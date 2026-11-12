@@ -12,6 +12,7 @@ __pycache__/
 .ruff_cache/
 tests/*
 !tests/test_umo_subscriptions.py
+!tests/test_dashboard_save.cjs
 .venv/
 _generated/
 data/

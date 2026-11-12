@@ -87,8 +87,7 @@ def test_metadata_version_is_current_release():
     metadata_path = Path(__file__).resolve().parents[1] / "metadata.yaml"
     metadata = metadata_path.read_text(encoding="utf-8")
 
-    # 2.5.0 是次版本号：移除了整赛季展示与历史赛季查询，改为纯 API 分段。
-    assert "version: 2.5.0" in metadata
+    assert "version: 2.5.2" in metadata
 
 
 def test_season_remaining_time_is_documented_in_readme_and_metadata():

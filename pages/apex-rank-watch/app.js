@@ -155,12 +155,13 @@
     if (!state.ready || state.busy) { notice("配置尚未加载或正在保存，请稍后重试", true); return false; }
     state.busy = true;
     document.querySelectorAll("[data-save]").forEach((button) => { button.disabled = true; });
-    const values = { ...state.values };
-    document.querySelectorAll("[data-config]").forEach((input) => { values[input.dataset.config] = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value; });
-    if ($("api-key").value.trim()) values.api_key = $("api-key").value.trim();
-    document.querySelectorAll("[data-secret]").forEach((input) => { if (input.value.trim()) values[input.dataset.secret] = input.value.trim(); });
-    const sessions = state.sessions.map((s) => ({ __template_key: "session", umo: s.umo, label: s.label, enabled: s.enabled, season_keyword_enabled: s.season_keyword_enabled !== false, output_mode: s.output_mode || "inherit", subscriptions: s.subscriptions || [] }));
-    try { await post("/settings", { values, sessions }); await loadAll(); if (showSuccess) notice("订阅和配置已保存"); return true; }
+    try {
+      const values = { ...state.values };
+      document.querySelectorAll("[data-config]").forEach((input) => { values[input.dataset.config] = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value; });
+      document.querySelectorAll("[data-secret]").forEach((input) => { if (input.value.trim()) values[input.dataset.secret] = input.value.trim(); });
+      const sessions = state.sessions.map((s) => ({ __template_key: "session", umo: s.umo, label: s.label, enabled: s.enabled, season_keyword_enabled: s.season_keyword_enabled !== false, output_mode: s.output_mode || "inherit", subscriptions: s.subscriptions || [] }));
+      await post("/settings", { values, sessions }); await loadAll(); if (showSuccess) notice("订阅和配置已保存"); return true;
+    }
     catch (error) { notice(`保存失败：${error.message}`, true); return false; }
     finally { state.busy = false; document.querySelectorAll("[data-save]").forEach((button) => { button.disabled = false; }); }
   }

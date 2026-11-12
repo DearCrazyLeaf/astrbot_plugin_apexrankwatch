@@ -393,6 +393,26 @@ class ApexApiClient:
             headers={"User-Agent": "AstrBot-ApexRankWatch/1.0"},
         )
 
+    def update_config(
+        self,
+        *,
+        api_key: str,
+        timeout_ms: int,
+        max_retries: int,
+        debug_enabled: bool,
+        season_probe_player: str,
+    ) -> None:
+        probe = str(season_probe_player or "").strip() or "moeneri"
+        if probe != self._season_probe_player or api_key != self._api_key:
+            self._season_cache.clear()
+            self._last_season_probe = None
+        self._api_key = api_key
+        self._timeout = max(1, int(timeout_ms)) / 1000.0
+        self._client.timeout = self._timeout
+        self._max_retries = max(0, int(max_retries))
+        self._debug_enabled = debug_enabled
+        self._season_probe_player = probe
+
     async def close(self) -> None:
         await self._client.aclose()
 

@@ -281,6 +281,8 @@ class ApexRankWatchWebUI:
                 "data": {
                     "enabled": bool(self.plugin._config.api_key),
                     "api_key_set": bool(self.plugin._config.api_key),
+                    "check_interval": self.plugin._config.check_interval,
+                    "timeout_ms": self.plugin._config.timeout_ms,
                     "session_count": len(sessions),
                     "enabled_session_count": sum(
                         1 for item in sessions if item["enabled"] and item["allowed"]
@@ -288,6 +290,9 @@ class ApexRankWatchWebUI:
                     "player_count": len(players),
                     "notify_count": sum(
                         1 for item in players if item["watch_mode"] == "notify"
+                    ),
+                    "record_count": sum(
+                        1 for item in players if item["watch_mode"] == "record"
                     ),
                     "runtime": state,
                     "sessions": sessions,
@@ -320,26 +325,17 @@ class ApexRankWatchWebUI:
             )
             if getattr(group, "origin", "") and group.origin not in item["umos"]:
                 item["umos"].append(group.origin)
-        for group_id, bindings in getattr(
+        for group_id in getattr(
             self.plugin, "_runtime_group_user_bindings", {}
-        ).items():
-            item = groups.setdefault(
+        ):
+            groups.setdefault(
                 str(group_id),
                 {"group_id": str(group_id), "umos": [], "bindings": []},
             )
-            item["bindings"] = self._normalize_bindings(bindings)
         for item in groups.values():
-            if not item["bindings"]:
-                item["bindings"] = self._normalize_bindings(
-                    next(
-                        (
-                            entry.get("bindings", {})
-                            for entry in configured
-                            if str(entry.get("group_id") or "") == item["group_id"]
-                        ),
-                        {},
-                    )
-                )
+            item["bindings"] = self._normalize_bindings(
+                self.plugin._get_group_user_bindings(item["group_id"])
+            )
         return [groups[key] for key in sorted(groups)]
 
     async def bindings(self):
@@ -450,6 +446,8 @@ class ApexRankWatchWebUI:
                     ) = await self.plugin._api.fetch_player_stats_auto(
                         identifier, alias.platform, use_uid
                     )
+                    if self.plugin._blocked_lookup_name(data.name, f"uid:{data.uid}"):
+                        raise ValueError("该玩家在全局黑名单中，无法订阅")
                     if data.rank_score < self.plugin._config.min_valid_score:
                         raise ValueError("API 返回无效分数，未创建订阅")
                     platform = self.plugin._normalize_platform(used_platform)
@@ -620,17 +618,7 @@ class ApexRankWatchWebUI:
         body = await request.json(default={})
         try:
             group_id, user_id, target = self._validate_binding_request(body)
-            group_bindings = deepcopy(
-                getattr(self.plugin, "_runtime_group_user_bindings", {})
-            )
-            bindings = group_bindings.setdefault(group_id, {})
-            if target:
-                bindings[user_id] = target
-            else:
-                bindings.pop(user_id, None)
-                if not bindings:
-                    group_bindings.pop(group_id, None)
-            self.plugin._runtime_group_user_bindings = group_bindings
+            self.plugin._set_group_user_binding(group_id, user_id, target or None)
             self.plugin._save_settings()
         except (ValueError, TypeError, AttributeError) as exc:
             return error_response(str(exc))
@@ -693,10 +681,13 @@ class ApexRankWatchWebUI:
     def _apply_runtime_config(self) -> None:
         plugin = self.plugin
         plugin._config = plugin._config.__class__.from_raw(self._raw_config())
-        plugin._api._api_key = plugin._config.api_key
-        plugin._api._timeout = max(1, plugin._config.timeout_ms) / 1000.0
-        plugin._api._max_retries = plugin._config.max_retries
-        plugin._api._debug_enabled = plugin._config.debug_logging
+        plugin._api.update_config(
+            api_key=plugin._config.api_key,
+            timeout_ms=plugin._config.timeout_ms,
+            max_retries=plugin._config.max_retries,
+            debug_enabled=plugin._config.debug_logging,
+            season_probe_player=plugin._config.season_probe_player,
+        )
         plugin._archive_cleanup_day = None
 
     async def save_settings(self):
@@ -708,6 +699,12 @@ class ApexRankWatchWebUI:
             snapshot = deepcopy(dict(config))
             subscription_snapshot = deepcopy(
                 getattr(self.plugin, "_runtime_session_subscriptions", {})
+            )
+            configured_snapshot = deepcopy(
+                getattr(self.plugin, "_configured_session_umos", None)
+            )
+            keyword_snapshot = set(
+                getattr(self.plugin, "_season_keyword_disabled_umos", set())
             )
             try:
                 values = self._validate_values(body.get("values", {}))
@@ -779,9 +776,16 @@ class ApexRankWatchWebUI:
                         if not allowed:
                             raise ValueError("本群未在白名单中，无法新增订阅")
                     subscriptions[umo] = clean
+                configured_umos = {str(item.get("umo") or "").strip() for item in sessions}
+                previous_umos = {
+                    str(item.get("umo") or "").strip()
+                    for item in self._configured_sessions()
+                } | (configured_snapshot or set())
+                for umo in previous_umos - configured_umos:
+                    subscriptions[umo] = {}
                 config.update(values)
                 config["session_settings"] = {"sessions": sessions}
-                configured_umos = {str(item.get("umo") or "").strip() for item in sessions}
+                self.plugin._configured_session_umos = configured_umos
                 disabled_umos = {
                     umo
                     for umo in getattr(self.plugin, "_season_keyword_disabled_umos", set())
@@ -804,6 +808,8 @@ class ApexRankWatchWebUI:
                 config.clear()
                 config.update(snapshot)
                 self.plugin._runtime_session_subscriptions = subscription_snapshot
+                self.plugin._configured_session_umos = configured_snapshot
+                self.plugin._season_keyword_disabled_umos = keyword_snapshot
                 try:
                     if hasattr(config, "save_config"):
                         config.save_config()

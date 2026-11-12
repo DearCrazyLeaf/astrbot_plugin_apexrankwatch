@@ -356,6 +356,12 @@ class Main(Star):
         self._runtime_session_subscriptions = self._normalize_session_subscriptions(
             settings.get("runtime_session_subscriptions", {})
         )
+        configured_umos = settings.get("configured_session_umos")
+        self._configured_session_umos = (
+            self._normalize_settings_list(configured_umos, lowercase=False)
+            if isinstance(configured_umos, list)
+            else None
+        )
         self._subscription_model_version = coerce_int(settings.get("subscription_model_version", 0), 0)
         self._store = GroupStore(self._data_dir / "groups.json", logger)
         self._store.load()
@@ -392,11 +398,20 @@ class Main(Star):
             "last_error": "",
         }
 
+        self._webui = None
         if context is not None:
-            from .webui import ApexRankWatchWebUI
-
-            self._webui = ApexRankWatchWebUI(self)
-            self._webui.register()
+            try:
+                from .webui import ApexRankWatchWebUI
+            except ModuleNotFoundError as exc:
+                if exc.name != "astrbot.api.web":
+                    raise
+                logger.warning(
+                    "当前 AstrBot 版本缺少插件面板 API，Dashboard 未启用；"
+                    "升级 AstrBot 至 4.26 或更新版本可使用面板。"
+                )
+            else:
+                self._webui = ApexRankWatchWebUI(self)
+                self._webui.register()
 
         logger.info(
             f"Apex Rank Watch 已加载，检测间隔 {self._config.check_interval} 分钟"
@@ -663,12 +678,20 @@ class Main(Star):
     def _normalize_group_user_bindings(cls, value) -> dict[str, dict[str, str]]:
         if not isinstance(value, dict):
             return {}
-        return {
-            str(group_id): bindings
-            for group_id, raw_bindings in value.items()
-            if str(group_id).strip()
-            and (bindings := cls._normalize_user_bindings(raw_bindings))
-        }
+        result = {}
+        for raw_group_id, raw_bindings in value.items():
+            group_id = str(raw_group_id or "").strip()
+            if not group_id or not isinstance(raw_bindings, dict):
+                continue
+            bindings = cls._normalize_user_bindings(raw_bindings)
+            # An empty override remembers a group-local removal of a legacy binding.
+            for raw_user_id, target in raw_bindings.items():
+                user_id = str(raw_user_id or "").strip()
+                if user_id and target == "":
+                    bindings[user_id] = ""
+            if bindings:
+                result[group_id] = bindings
+        return result
 
     @staticmethod
     def _normalize_session_subscriptions(value) -> dict[str, dict[str, str]]:
@@ -695,6 +718,18 @@ class Main(Star):
         legacy = getattr(self, "_subscription_model_version", 0) < 1
         changed = legacy
         config_changed = False
+        configured_umos = {
+            str(item.get("umo") or "").strip()
+            for item in (sessions if isinstance(sessions, list) else [])
+            if isinstance(item, dict) and str(item.get("umo") or "").strip()
+        }
+        previous_umos = getattr(self, "_configured_session_umos", None)
+        if previous_umos is not None:
+            for umo in previous_umos - configured_umos:
+                subscriptions[umo] = {}
+        if previous_umos != configured_umos:
+            self._configured_session_umos = configured_umos
+            changed = True
         for item in sessions if isinstance(sessions, list) else []:
             if not isinstance(item, dict):
                 continue
@@ -765,6 +800,7 @@ class Main(Star):
         raw = self.config if isinstance(self.config, dict) else {}
         settings = raw.get("session_settings", {}) if isinstance(raw, dict) else {}
         sessions = settings.get("sessions", []) if isinstance(settings, dict) else []
+        config_changed = False
         for item in sessions if isinstance(sessions, list) else []:
             if not isinstance(item, dict):
                 continue
@@ -773,12 +809,16 @@ class Main(Star):
             group_id = str(item.get("group_id") or (parts[2] if len(parts) == 3 else ""))
             if umo and group_id in groups:
                 umos.add(umo)
+                item["season_keyword_enabled"] = False
+                config_changed = True
         for group_id, group in self._store.iter_groups():
             if str(group_id) in groups and getattr(group, "origin", ""):
                 umos.add(str(group.origin))
         if umos != getattr(self, "_season_keyword_disabled_umos", set()):
             self._season_keyword_disabled_umos = umos
             self._save_settings()
+        if config_changed and hasattr(raw, "save_config"):
+            raw.save_config()
 
     def _set_session_subscriptions(
         self, umo: str, subscriptions: dict[str, str]
@@ -850,6 +890,7 @@ class Main(Star):
             "runtime_user_bindings": {},
             "runtime_group_user_bindings": {},
             "runtime_session_subscriptions": {},
+            "configured_session_umos": None,
             "subscription_model_version": 0,
         }
         if not self._settings_file.exists():
@@ -894,6 +935,9 @@ class Main(Star):
                     getattr(self, "_runtime_session_subscriptions", {}).items()
                 )
             },
+            "configured_session_umos": sorted(
+                getattr(self, "_configured_session_umos", None) or set()
+            ),
             "subscription_model_version": getattr(self, "_subscription_model_version", 1),
         }
         try:
@@ -1147,15 +1191,13 @@ class Main(Star):
 
     def _is_season_keyword_disabled(self, umo: str, group_id: str = "") -> bool:
         umo = str(umo or "").strip()
-        if umo and umo in self._season_keyword_disabled_umos:
-            return True
         raw = self.config if isinstance(self.config, dict) else {}
         settings = raw.get("session_settings", {}) if isinstance(raw, dict) else {}
         sessions = settings.get("sessions", []) if isinstance(settings, dict) else []
         for item in sessions if isinstance(sessions, list) else []:
             if isinstance(item, dict) and str(item.get("umo") or "").strip() == umo:
                 return item.get("season_keyword_enabled", True) is False
-        return False
+        return bool(umo) and umo in self._season_keyword_disabled_umos
 
     def _set_season_keyword_disabled(self, umo: str, disabled: bool) -> None:
         umo = str(umo or "").strip()
@@ -1344,13 +1386,7 @@ class Main(Star):
         if not self._aliases_enabled():
             return PlayerAliasResolution("", "", platform)
         user_id = self._get_user_id(event)
-        group_id = self._get_group_id(event)
-        if group_id:
-            target = getattr(self, "_runtime_group_user_bindings", {}).get(
-                group_id, {}
-            ).get(user_id, "")
-        else:
-            target = getattr(self, "_runtime_user_bindings", {}).get(user_id, "")
+        target = self._get_user_bindings_for_event(event).get(user_id, "")
         if not user_id or not target:
             return PlayerAliasResolution("", "", platform)
         resolved_name, alias_platform = self._parse_alias_target_platform(target)
@@ -1416,26 +1452,43 @@ class Main(Star):
             f"QQ {user_id}={target}" for user_id, target in sorted(bindings.items())
         )
 
+    def _get_group_user_bindings(self, group_id: str) -> dict[str, str]:
+        bindings = dict(getattr(self, "_runtime_user_bindings", {}))
+        overrides = getattr(self, "_runtime_group_user_bindings", {}).get(group_id, {})
+        for user_id, target in overrides.items():
+            if target:
+                bindings[user_id] = target
+            else:
+                bindings.pop(user_id, None)
+        return bindings
+
     def _get_user_bindings_for_event(self, event: AstrMessageEvent) -> dict[str, str]:
         group_id = self._get_group_id(event)
         if group_id:
-            return getattr(self, "_runtime_group_user_bindings", {}).get(group_id, {})
+            return self._get_group_user_bindings(group_id)
         return getattr(self, "_runtime_user_bindings", {})
+
+    def _set_group_user_binding(
+        self, group_id: str, user_id: str, target: str | None
+    ) -> None:
+        group_bindings = getattr(self, "_runtime_group_user_bindings", {})
+        bindings = group_bindings.setdefault(group_id, {})
+        if target:
+            bindings[user_id] = target
+        elif user_id in getattr(self, "_runtime_user_bindings", {}):
+            bindings[user_id] = ""
+        else:
+            bindings.pop(user_id, None)
+        if not bindings:
+            group_bindings.pop(group_id, None)
+        self._runtime_group_user_bindings = group_bindings
 
     def _set_user_binding_for_event(
         self, event: AstrMessageEvent, user_id: str, target: str | None
     ) -> None:
         group_id = self._get_group_id(event)
         if group_id:
-            group_bindings = getattr(self, "_runtime_group_user_bindings", {})
-            bindings = group_bindings.setdefault(group_id, {})
-            if target:
-                bindings[user_id] = target
-            else:
-                bindings.pop(user_id, None)
-                if not bindings:
-                    group_bindings.pop(group_id, None)
-            self._runtime_group_user_bindings = group_bindings
+            self._set_group_user_binding(group_id, user_id, target)
             return
         bindings = getattr(self, "_runtime_user_bindings", {})
         if target:
@@ -3513,6 +3566,8 @@ class Main(Star):
                 continue
             player_data = result.player_data
             if player_data is None:
+                continue
+            if self._blocked_lookup_name(player_data.name, f"uid:{player_data.uid}"):
                 continue
             self._apply_record_alias_to_player_data(player_data, player)
 
