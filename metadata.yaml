@@ -1,18 +1,19 @@
 name: astrbot_plugin_apexrankwatch
 display_name: Apex Rank Watch
-version: 2.5.0
+version: 2.5.1
 author: moeneri
-short_desc: 查询 APEX 段位、地图、排位分段结束时间和剩余时间、猎杀线，支持监控、持续记录、分数变化图、全局别名和个人绑定。
+short_desc: 查询 APEX 段位、地图、排位分段和猎杀线；支持群内监控与记录、全局查询别名、个人默认查询绑定及按 UMO 管理的自动推送。
 description: |-
-  支持查询 APEX 玩家段位、地图轮换时间、排位分段结束时间和剩余时间、猎杀线，持续监控玩家段位变化并通知，也可持续记录分数变化只记录不通报，并生成最近最多 50 次变化的高清长图。
+  查询 APEX 玩家段位、地图轮换、排位分段结束时间和猎杀线；可在群内持续监控并通报分数变化，或只记录不通报，并生成最近最多 50 次变化的高清长图。
 
   插件行为：
-  - 玩家查询：输出段位、RP、等级、在线状态和当前英雄，可用玩家名、uid:、uuid:、全局别名或个人绑定查询。
-  - 群内监控与记录：/持续视奸 会记录并主动通报排位分变化，/持续记录 只记录不通报，两者都会进入统计列表。
+  - 玩家查询：输出段位、RP、等级、在线状态和当前英雄；支持玩家名、uid:、uuid:、全局查询别名，或用户自己的个人默认绑定。
+  - 群内监控与记录：/持续视奸 记录并通报排位分变化，/持续记录 只记录不通报；两者都会进入统计列表。自动推送目标可在 Dashboard 按 UMO 分别订阅。
   - 分数变化图：/分数变化 可查看本群统计玩家最近分数变化，默认 20 次，最多 50 次。
   - 地图与赛季：查询排位地图、全天地图排期、匹配地图、排位分段结束时间和剩余时间、猎杀线。
-  - 别名功能：别名是全局查询映射，适合把群内常用称呼映射到玩家名或 UID；别名列表不包含个人绑定。
-  - 绑定功能：绑定是个人默认查询目标，用户绑定后直接发送 /apex查询 可查看自己的信息。
+  - 全局别名：将常用称呼映射到玩家名或 UID，任何可使用插件的用户都可用该别名查询；别名本身不创建监控，也不包含个人绑定。
+  - 个人默认绑定：用户为自己设置默认查询玩家后，可直接发送 /apex查询；绑定只影响该用户的查询目标，不加入监控或推送。
+  - UMO 自动推送：Dashboard 为每个完整 UMO 选择订阅玩家、通报或仅记录模式及输出格式；绑定与订阅彼此独立。可按日期查看各 UMO 的推送日志和归档卡片。
 
   指令/指令组：
   - 查询：/apexrank <玩家名|uid:...> [平台]、/apex查询、/视奸
@@ -20,8 +21,11 @@ description: |-
   - 信息：/map、/全天地图、/匹配地图、/apexseason、/apexpredator [平台]、/猎杀
   - 别名：/apexalias add <别名> <玩家名|uid:...> [平台]、/apexalias list、/apexalias remove <别名>、/apex取消别名 <别名>
   - 绑定：/apex绑定 <玩家名|uid:...> [平台]、/apex绑定 list、/apex绑定列表、/apex绑定 remove、/apex解绑
-  - 管理：/apexblacklist <add|remove|list|clear> <玩家ID>、/赛季关闭、/赛季开启、/apex_download
+  - 管理：/apexblacklist <add|remove|list|clear> <玩家ID>、/赛季关闭、/赛季开启、/apex_download；赛季关键词开关按 UMO 会话保存
 repo: https://github.com/moeneri/astrbot_plugin_apexrankwatch
 license: MIT
 astrbot_version: ">=4.16,<5"
 support_platforms: []
+pages:
+  - name: apex-rank-watch
+    title: Apex Rank Watch

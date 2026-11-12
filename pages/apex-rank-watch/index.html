@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Apex Rank Watch</title>
+  <link rel="stylesheet" href="./style.css?v=2.5.1" />
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
+  <script defer src="./app.js?v=2.5.1"></script>
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <a class="brand" href="#overview" aria-label="Apex Rank Watch 首页"><img src="./assets/apex-badge.png" alt="" /><span><strong>APEX RANK WATCH</strong><small>PLUGIN CONTROL</small></span></a>
+    <div class="sidebar-label">管理面板</div>
+    <nav aria-label="页面导航">
+      <button class="nav-item active" data-page="overview"><span class="nav-icon" aria-hidden="true">◷</span><span>运行概览</span></button>
+      <button class="nav-item" data-page="sessions"><span class="nav-icon" aria-hidden="true">◎</span><span>会话订阅</span></button>
+      <button class="nav-item" data-page="logs"><span class="nav-icon" aria-hidden="true">▤</span><span>推送日志</span></button>
+      <button class="nav-item" data-page="bindings"><span class="nav-icon" aria-hidden="true">♙</span><span>个人查询绑定</span></button>
+      <button class="nav-item" data-page="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span>插件配置</span></button>
+    </nav>
+    <div class="sidebar-foot"><span class="api-status">正在读取运行状态</span><span>AstrBot · Plugin Page</span></div>
+  </aside>
+  <main class="content">
+    <header class="topbar"><div><p class="eyebrow">APEX RANK WATCH <span>/</span> <span id="page-section">OVERVIEW</span></p><h1 id="page-title">运行概览</h1></div><div class="top-actions"><span id="dirty-indicator" hidden>未保存</span><button class="icon-button" id="refresh" title="刷新数据" aria-label="刷新数据">↻</button><span class="status-pill">等待连接</span></div></header>
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+    <section class="page active" data-view="overview">
+      <div class="overview-summary"><div><p class="eyebrow">轮询状态</p><strong id="overview-poll">等待首次轮询</strong><small id="overview-poll-hint">上次完成：暂无</small></div><span class="summary-divider"></span><div><p class="eyebrow">API KEY</p><strong id="overview-api">未配置</strong><small>用于玩家查询与自动轮询请求</small></div><span class="summary-divider"></span><div><p class="eyebrow">检查间隔</p><strong id="overview-interval">—</strong><small id="overview-interval-hint">配置中的 API 请求超时</small></div><span class="summary-mark"><img src="./assets/apex-badge.png" alt="" /></span></div>
+      <div class="metric-grid">
+        <article class="metric-card"><span class="metric-icon icon-rank" aria-hidden="true">♛</span><div><small>会话订阅</small><strong id="metric-sessions">—</strong></div></article>
+        <article class="metric-card"><span class="metric-icon icon-notify" aria-hidden="true">↗</span><div><small>推送订阅</small><strong id="metric-notify">—</strong></div></article>
+        <article class="metric-card"><span class="metric-icon icon-player" aria-hidden="true">♙</span><div><small>玩家订阅</small><strong id="metric-players">—</strong></div></article>
+        <article class="metric-card"><span class="metric-icon icon-record" aria-hidden="true">▤</span><div><small>仅记录</small><strong id="metric-record">—</strong></div></article>
+      </div>
+      <div class="overview-grid">
+        <section class="panel"><div class="panel-heading"><div><p class="eyebrow">RECENT EVENTS</p><h2>最近推送</h2></div><button class="text-button" data-page-target="logs">全部记录 →</button></div><div class="table-scroll"><table class="activity-table"><thead><tr><th>时间</th><th>玩家</th><th>UMO 会话</th><th>分数变化</th><th>结果</th></tr></thead><tbody id="recent-entries"><tr><td colspan="5" class="empty-state">正在读取推送记录…</td></tr></tbody></table></div></section>
+        <section class="panel"><div class="panel-heading"><div><p class="eyebrow">SESSION STATUS</p><h2>会话状态</h2></div><button class="text-button" data-page-target="sessions">管理 →</button></div><div id="session-overview" class="session-overview"><p class="empty-state">正在读取会话…</p></div></section>
+      </div>
+    </section>
+    <section class="page" data-view="sessions">
+      <div class="section-intro"><div><p class="eyebrow">SESSION SUBSCRIPTIONS</p><h2>会话订阅</h2><p>按 UMO 管理订阅玩家、通知模式、推送状态和赛季关键词自动回复。</p></div><div class="button-row"><button class="ghost" id="add-session">＋ 新增会话</button><button class="primary" data-save>保存更改</button></div></div>
+      <div class="session-toolbar"><div class="filter-tabs"><button class="active" data-filter="all">全部</button><button data-filter="enabled">运行中</button><button data-filter="paused">暂停 / 受限</button></div><label class="search"><span aria-hidden="true">⌕</span><input id="session-search" placeholder="搜索备注、UMO 或玩家" aria-label="搜索会话" /></label></div>
+      <div class="session-cards" id="session-cards"><p class="empty-state">正在读取会话…</p></div>
+    </section>
+    <section class="page" data-view="logs">
+      <div class="section-intro"><div><p class="eyebrow">DAILY DELIVERY ARCHIVE</p><h2>推送日志</h2><p>查看会话推送结果、分数变化和归档卡片。</p></div><button class="ghost" id="refresh-logs">刷新日志 ↻</button></div>
+      <div class="panel log-toolbar"><label>日期<select id="log-date" aria-label="归档日期"></select></label><label>会话<select id="log-session" aria-label="归档会话"><option value="">全部会话</option></select></label><label>结果<select id="log-status" aria-label="发送结果"><option value="">全部结果</option><option value="sent">发送成功</option><option value="failed">发送失败</option><option value="recorded">仅记录</option><option value="fetch_failed">取数失败</option></select></label><span id="log-summary" role="status"></span></div>
+      <div id="log-entries" class="log-grid"><p class="empty-state">正在读取归档…</p></div>
+    </section>
+    <section class="page" data-view="bindings">
+      <div class="section-intro"><div><p class="eyebrow">PERSONAL QUERY DEFAULTS</p><h2>个人查询绑定</h2><p>为无参数 /apex查询 设置默认目标；绑定不会加入自动推送。</p></div></div>
+      <section class="panel"><form id="binding-form" class="binding-form"><label>群 ID<input id="binding-group" required placeholder="群 ID" /></label><label>用户 ID<input id="binding-user" required placeholder="用户 ID" /></label><label>默认玩家<input id="binding-target" required placeholder="玩家名 或 uid:1234 pc" /></label><button class="primary" type="submit">保存绑定</button></form></section><div id="binding-groups" class="log-grid"></div>
+    </section>
+    <section class="page" data-view="settings">
+      <div class="section-intro"><div><p class="eyebrow">PLUGIN CONFIGURATION</p><h2>插件配置</h2><p>此处与 AstrBot 插件配置共用 schema；UMO 与玩家订阅在“会话订阅”中管理。</p></div><button class="primary" data-save>保存更改</button></div>
+      <div id="settings-grid" class="settings-grid"><p class="empty-state">正在读取配置 schema…</p></div>
+    </section>
+    <footer>Apex Rank Watch <span>·</span> AstrBot Plugin Page</footer>
+  </main>
+</div>
+<dialog id="card-preview"><button class="icon-button" id="close-preview" aria-label="关闭预览">×</button><img id="preview-image" alt="推送卡片" /></dialog>
+</body>
+</html>

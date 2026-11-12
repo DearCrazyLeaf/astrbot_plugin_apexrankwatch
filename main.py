@@ -4,16 +4,18 @@ import asyncio
 import hashlib
 import json
 import time
-from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+
+import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-import astrbot.api.message_components as Comp
 from astrbot.api.star import Context, Star, StarTools
 
 try:
@@ -40,6 +42,14 @@ if __package__:
         is_score_drop_abnormal,
         normalize_platform,
     )
+    from .push_archive import PushArchive
+    from .score_report_rank_assets import rank_asset_file_for_label
+    from .score_report_renderer import (
+        configure_font_paths as configure_score_report_font_paths,
+    )
+    from .score_report_renderer import (
+        render_dashboard_image_png,
+    )
     from .storage import (
         SCORE_HISTORY_LIMIT,
         WATCH_MODE_NOTIFY,
@@ -50,11 +60,6 @@ if __package__:
         normalize_watch_mode,
         trim_score_history,
     )
-    from .score_report_renderer import (
-        configure_font_paths as configure_score_report_font_paths,
-        render_dashboard_image_png,
-    )
-    from .score_report_rank_assets import rank_asset_file_for_label
     from .utils import SHANGHAI_TZ, coerce_bool, coerce_int, now_epoch_ms, now_str
 else:
     from apex_service import (
@@ -75,6 +80,14 @@ else:
         is_score_drop_abnormal,
         normalize_platform,
     )
+    from push_archive import PushArchive
+    from score_report_rank_assets import rank_asset_file_for_label
+    from score_report_renderer import (
+        configure_font_paths as configure_score_report_font_paths,
+    )
+    from score_report_renderer import (
+        render_dashboard_image_png,
+    )
     from storage import (
         SCORE_HISTORY_LIMIT,
         WATCH_MODE_NOTIFY,
@@ -85,11 +98,6 @@ else:
         normalize_watch_mode,
         trim_score_history,
     )
-    from score_report_renderer import (
-        configure_font_paths as configure_score_report_font_paths,
-        render_dashboard_image_png,
-    )
-    from score_report_rank_assets import rank_asset_file_for_label
     from utils import SHANGHAI_TZ, coerce_bool, coerce_int, now_epoch_ms, now_str
 
 
@@ -129,6 +137,7 @@ class PluginConfig:
     player_aliases: str
     alias_admin_only: bool
     season_probe_player: str
+    reply_to_command: bool
 
     @staticmethod
     def from_raw(raw) -> "PluginConfig":
@@ -157,6 +166,7 @@ class PluginConfig:
             alias_enabled=coerce_bool(raw.get("alias_enabled", True), True),
             player_aliases=str(raw.get("player_aliases", "")).strip(),
             alias_admin_only=coerce_bool(raw.get("alias_admin_only", True), True),
+            reply_to_command=coerce_bool(raw.get("reply_to_command", True), True),
         )
 
 
@@ -173,6 +183,8 @@ class PollFetchResult:
     group_origin: str
     player: PlayerRecord
     platform: str
+    group_origins: tuple[str, ...] = ()
+    session_modes: tuple[tuple[str, str], ...] = ()
     player_data: ApexPlayerStats | None = None
     not_found: bool = False
     error: Exception | None = None
@@ -315,6 +327,7 @@ class Main(Star):
 
         if config is None:
             config = {}
+        self.config = config
         self._config = PluginConfig.from_raw(config)
         self._data_dir = self._resolve_data_dir(self._config.data_dir)
         self._settings_file = self._data_dir / "settings.json"
@@ -324,8 +337,8 @@ class Main(Star):
             settings.get("runtime_blacklist", []),
             lowercase=True,
         )
-        self._season_keyword_disabled_groups = self._normalize_settings_list(
-            settings.get("season_keyword_disabled_groups", []),
+        self._season_keyword_disabled_umos = self._normalize_settings_list(
+            settings.get("season_keyword_disabled_umos", []),
             lowercase=False,
         )
         (
@@ -337,9 +350,22 @@ class Main(Star):
         self._runtime_user_bindings = self._normalize_user_bindings(
             settings.get("runtime_user_bindings", {}),
         )
+        self._runtime_group_user_bindings = self._normalize_group_user_bindings(
+            settings.get("runtime_group_user_bindings", {})
+        )
+        self._runtime_session_subscriptions = self._normalize_session_subscriptions(
+            settings.get("runtime_session_subscriptions", {})
+        )
+        self._subscription_model_version = coerce_int(settings.get("subscription_model_version", 0), 0)
         self._store = GroupStore(self._data_dir / "groups.json", logger)
         self._store.load()
         self._migrate_store_keys()
+        self._migrate_session_subscriptions()
+        self._migrate_season_keyword_settings(
+            settings.get("season_keyword_disabled_groups", [])
+        )
+        self._push_archive = PushArchive(self._data_dir / "push_archive")
+        self._cleanup_push_archive()
         self._daily_map_pool_state = self._load_daily_map_pool_state()
 
         self._api = ApexApiClient(
@@ -359,6 +385,18 @@ class Main(Star):
         self._daily_map_refresh_lock = asyncio.Lock()
         self._runtime_started = False
         self._font_notice_sent = False
+        self._webui_poll_state = {
+            "status": "waiting",
+            "last_started": None,
+            "last_finished": None,
+            "last_error": "",
+        }
+
+        if context is not None:
+            from .webui import ApexRankWatchWebUI
+
+            self._webui = ApexRankWatchWebUI(self)
+            self._webui.register()
 
         logger.info(
             f"Apex Rank Watch 已加载，检测间隔 {self._config.check_interval} 分钟"
@@ -621,6 +659,161 @@ class Main(Star):
                 bindings[user_id] = target
         return bindings
 
+    @classmethod
+    def _normalize_group_user_bindings(cls, value) -> dict[str, dict[str, str]]:
+        if not isinstance(value, dict):
+            return {}
+        return {
+            str(group_id): bindings
+            for group_id, raw_bindings in value.items()
+            if str(group_id).strip()
+            and (bindings := cls._normalize_user_bindings(raw_bindings))
+        }
+
+    @staticmethod
+    def _normalize_session_subscriptions(value) -> dict[str, dict[str, str]]:
+        if not isinstance(value, dict):
+            return {}
+        result: dict[str, dict[str, str]] = {}
+        for raw_umo, raw_players in value.items():
+            umo = str(raw_umo or "").strip()
+            if not umo or not isinstance(raw_players, dict):
+                continue
+            players = {}
+            for raw_key, raw_mode in raw_players.items():
+                player_key = str(raw_key or "").strip()
+                if player_key:
+                    players[player_key] = normalize_watch_mode(raw_mode)
+            result[umo] = players
+        return result
+
+    def _migrate_session_subscriptions(self) -> None:
+        subscriptions = getattr(self, "_runtime_session_subscriptions", {})
+        raw = getattr(self, "config", {})
+        settings = raw.get("session_settings", {}) if isinstance(raw, dict) else {}
+        sessions = settings.get("sessions", []) if isinstance(settings, dict) else []
+        legacy = getattr(self, "_subscription_model_version", 0) < 1
+        changed = legacy
+        config_changed = False
+        for item in sessions if isinstance(sessions, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("__template_key") != "session":
+                item["__template_key"] = "session"
+                config_changed = True
+            if "group_id" not in item:
+                parts = str(item.get("umo") or "").split(":", 2)
+                item["group_id"] = parts[2] if len(parts) == 3 else ""
+                config_changed = True
+            item.setdefault("label", "")
+            item.setdefault("enabled", True)
+            if "season_keyword_enabled" not in item:
+                item["season_keyword_enabled"] = True
+                config_changed = True
+            item.setdefault("output_mode", "inherit")
+        # Old group origins remain destinations even when another adapter joins the group.
+        for _, group in self._store.iter_groups():
+            if group.origin and group.origin not in subscriptions:
+                subscriptions[group.origin] = (
+                    {
+                        key: self._watch_mode(player)
+                        for key, player in group.players.items()
+                    }
+                    if legacy
+                    else {}
+                )
+                changed = True
+        for item in sessions if isinstance(sessions, list) else []:
+            if not isinstance(item, dict):
+                continue
+            umo = str(item.get("umo") or "").strip()
+            if not umo or umo in subscriptions:
+                continue
+            parts = umo.split(":", 2)
+            group_id = str(
+                item.get("group_id") or (parts[2] if len(parts) == 3 else "")
+            )
+            group = self._store.get_group(group_id) if group_id else None
+            subscriptions[umo] = (
+                {
+                    key: normalize_watch_mode(
+                        getattr(player, "watch_mode", WATCH_MODE_NOTIFY)
+                    )
+                    for key, player in group.players.items()
+                }
+                if group and legacy
+                else {}
+            )
+            changed = True
+        if changed:
+            self._runtime_session_subscriptions = subscriptions
+            self._subscription_model_version = 1
+            self._save_settings()
+        if config_changed and hasattr(raw, "save_config"):
+            raw.save_config()
+
+    def _migrate_season_keyword_settings(self, legacy_groups: Any) -> None:
+        """Convert the old group-wide switch to per-UMO state."""
+        groups = {
+            str(group_id).strip()
+            for group_id in (legacy_groups or [])
+            if str(group_id).strip()
+        }
+        if not groups:
+            return
+        umos: set[str] = set(getattr(self, "_season_keyword_disabled_umos", set()))
+        raw = self.config if isinstance(self.config, dict) else {}
+        settings = raw.get("session_settings", {}) if isinstance(raw, dict) else {}
+        sessions = settings.get("sessions", []) if isinstance(settings, dict) else []
+        for item in sessions if isinstance(sessions, list) else []:
+            if not isinstance(item, dict):
+                continue
+            umo = str(item.get("umo") or "").strip()
+            parts = umo.split(":", 2)
+            group_id = str(item.get("group_id") or (parts[2] if len(parts) == 3 else ""))
+            if umo and group_id in groups:
+                umos.add(umo)
+        for group_id, group in self._store.iter_groups():
+            if str(group_id) in groups and getattr(group, "origin", ""):
+                umos.add(str(group.origin))
+        if umos != getattr(self, "_season_keyword_disabled_umos", set()):
+            self._season_keyword_disabled_umos = umos
+            self._save_settings()
+
+    def _set_session_subscriptions(
+        self, umo: str, subscriptions: dict[str, str]
+    ) -> None:
+        normalized = {
+            str(key): normalize_watch_mode(mode)
+            for key, mode in subscriptions.items()
+            if str(key).strip()
+        }
+        current = getattr(self, "_runtime_session_subscriptions", {})
+        current[str(umo)] = normalized
+        self._runtime_session_subscriptions = current
+        self._save_settings()
+
+    def _subscribe_session_player(self, umo: str, player_key: str, mode: str) -> None:
+        if not umo:
+            return
+        subscriptions = getattr(self, "_runtime_session_subscriptions", {})
+        session = subscriptions.setdefault(umo, {})
+        session[player_key] = normalize_watch_mode(mode)
+        subscriptions[umo] = session
+        self._runtime_session_subscriptions = subscriptions
+        self._save_settings()
+
+    def _unsubscribe_player_everywhere(self, group_id: str, player_key: str) -> None:
+        subscriptions = getattr(self, "_runtime_session_subscriptions", {})
+        for umo, players in list(subscriptions.items()):
+            parts = str(umo).split(":", 2)
+            if len(parts) != 3 or parts[2] != str(group_id):
+                continue
+            players.pop(player_key, None)
+            subscriptions[umo] = players
+        self._runtime_session_subscriptions = subscriptions
+        self._save_settings()
+
     def _get_config_player_aliases(self) -> dict[str, str]:
         return self._parse_player_aliases(getattr(self._config, "player_aliases", ""))
 
@@ -652,9 +845,12 @@ class Main(Star):
     def _load_settings(self) -> dict:
         defaults = {
             "runtime_blacklist": [],
-            "season_keyword_disabled_groups": [],
+            "season_keyword_disabled_umos": [],
             "runtime_player_aliases": {},
             "runtime_user_bindings": {},
+            "runtime_group_user_bindings": {},
+            "runtime_session_subscriptions": {},
+            "subscription_model_version": 0,
         }
         if not self._settings_file.exists():
             return defaults
@@ -673,7 +869,9 @@ class Main(Star):
         alias_display_names = self._get_runtime_player_alias_display_names()
         payload = {
             "runtime_blacklist": sorted(self._runtime_blacklist),
-            "season_keyword_disabled_groups": sorted(self._season_keyword_disabled_groups),
+            "season_keyword_disabled_umos": sorted(
+                getattr(self, "_season_keyword_disabled_umos", set())
+            ),
             "runtime_player_aliases": {
                 key: {
                     "target": target,
@@ -684,6 +882,19 @@ class Main(Star):
             "runtime_user_bindings": dict(
                 sorted(getattr(self, "_runtime_user_bindings", {}).items())
             ),
+            "runtime_group_user_bindings": {
+                group_id: dict(sorted(bindings.items()))
+                for group_id, bindings in sorted(
+                    getattr(self, "_runtime_group_user_bindings", {}).items()
+                )
+            },
+            "runtime_session_subscriptions": {
+                umo: dict(sorted(players.items()))
+                for umo, players in sorted(
+                    getattr(self, "_runtime_session_subscriptions", {}).items()
+                )
+            },
+            "subscription_model_version": getattr(self, "_subscription_model_version", 1),
         }
         try:
             self._settings_file.parent.mkdir(parents=True, exist_ok=True)
@@ -695,6 +906,7 @@ class Main(Star):
             tmp_file.replace(self._settings_file)
         except Exception as exc:
             logger.error(f"保存插件设置失败: {exc}")
+            raise
 
     def _load_daily_map_pool_state(self) -> DailyMapPoolState:
         if not self._daily_map_pool_state_file.exists():
@@ -831,6 +1043,8 @@ class Main(Star):
             return text
 
     def _prefer_quote_reply(self, event: AstrMessageEvent) -> bool:
+        if not coerce_bool(getattr(self._config, "reply_to_command", True), True):
+            return False
         # QQ 个人号（aiocqhttp / OneBot v11）支持引用回复。
         try:
             return str(event.get_platform_name() or "").lower() == "aiocqhttp"
@@ -931,18 +1145,36 @@ class Main(Star):
             )
         raise ValueError("请输入正确的参数，例如 /apexseason 或 /apexseason current")
 
-    def _is_season_keyword_disabled(self, group_id: str) -> bool:
-        if not group_id:
-            return False
-        return group_id in self._season_keyword_disabled_groups
+    def _is_season_keyword_disabled(self, umo: str, group_id: str = "") -> bool:
+        umo = str(umo or "").strip()
+        if umo and umo in self._season_keyword_disabled_umos:
+            return True
+        raw = self.config if isinstance(self.config, dict) else {}
+        settings = raw.get("session_settings", {}) if isinstance(raw, dict) else {}
+        sessions = settings.get("sessions", []) if isinstance(settings, dict) else []
+        for item in sessions if isinstance(sessions, list) else []:
+            if isinstance(item, dict) and str(item.get("umo") or "").strip() == umo:
+                return item.get("season_keyword_enabled", True) is False
+        return False
 
-    def _set_season_keyword_disabled(self, group_id: str, disabled: bool) -> None:
-        if not group_id:
+    def _set_season_keyword_disabled(self, umo: str, disabled: bool) -> None:
+        umo = str(umo or "").strip()
+        if not umo:
             return
         if disabled:
-            self._season_keyword_disabled_groups.add(group_id)
+            self._season_keyword_disabled_umos.add(umo)
         else:
-            self._season_keyword_disabled_groups.discard(group_id)
+            self._season_keyword_disabled_umos.discard(umo)
+        raw = self.config if isinstance(self.config, dict) else {}
+        settings = raw.get("session_settings", {}) if isinstance(raw, dict) else {}
+        sessions = settings.get("sessions", []) if isinstance(settings, dict) else []
+        changed = False
+        for item in sessions if isinstance(sessions, list) else []:
+            if isinstance(item, dict) and str(item.get("umo") or "").strip() == umo:
+                item["season_keyword_enabled"] = not disabled
+                changed = True
+        if changed and hasattr(self.config, "save_config"):
+            self.config.save_config()
         self._save_settings()
 
     def _get_user_id(self, event: AstrMessageEvent) -> str:
@@ -984,11 +1216,11 @@ class Main(Star):
         users = self._parse_list(self._config.user_blacklist)
         return user_id in users
 
-    def _is_group_allowed(self, group_id: str) -> bool:
+    def _is_group_allowed(self, group_id: str, umo: str = "") -> bool:
         if not self._config.whitelist_enabled:
             return True
         groups = self._parse_list(self._config.whitelist_groups)
-        return group_id in groups
+        return group_id in groups or (bool(umo) and umo in groups)
 
     def _guard_access(self, event: AstrMessageEvent, require_group: bool = False) -> str | None:
         user_id = self._get_user_id(event)
@@ -1005,7 +1237,8 @@ class Main(Star):
         if not group_id and not self._config.allow_private:
             return "⚠️ 当前不允许私聊使用，请在群聊中使用"
 
-        if group_id and not self._is_group_allowed(group_id):
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        if group_id and not self._is_group_allowed(group_id, umo):
             return "⚠️ 本群未在白名单中，无法使用此插件"
 
         return None
@@ -1111,7 +1344,13 @@ class Main(Star):
         if not self._aliases_enabled():
             return PlayerAliasResolution("", "", platform)
         user_id = self._get_user_id(event)
-        target = getattr(self, "_runtime_user_bindings", {}).get(user_id, "")
+        group_id = self._get_group_id(event)
+        if group_id:
+            target = getattr(self, "_runtime_group_user_bindings", {}).get(
+                group_id, {}
+            ).get(user_id, "")
+        else:
+            target = getattr(self, "_runtime_user_bindings", {}).get(user_id, "")
         if not user_id or not target:
             return PlayerAliasResolution("", "", platform)
         resolved_name, alias_platform = self._parse_alias_target_platform(target)
@@ -1177,6 +1416,34 @@ class Main(Star):
             f"QQ {user_id}={target}" for user_id, target in sorted(bindings.items())
         )
 
+    def _get_user_bindings_for_event(self, event: AstrMessageEvent) -> dict[str, str]:
+        group_id = self._get_group_id(event)
+        if group_id:
+            return getattr(self, "_runtime_group_user_bindings", {}).get(group_id, {})
+        return getattr(self, "_runtime_user_bindings", {})
+
+    def _set_user_binding_for_event(
+        self, event: AstrMessageEvent, user_id: str, target: str | None
+    ) -> None:
+        group_id = self._get_group_id(event)
+        if group_id:
+            group_bindings = getattr(self, "_runtime_group_user_bindings", {})
+            bindings = group_bindings.setdefault(group_id, {})
+            if target:
+                bindings[user_id] = target
+            else:
+                bindings.pop(user_id, None)
+                if not bindings:
+                    group_bindings.pop(group_id, None)
+            self._runtime_group_user_bindings = group_bindings
+            return
+        bindings = getattr(self, "_runtime_user_bindings", {})
+        if target:
+            bindings[user_id] = target
+        else:
+            bindings.pop(user_id, None)
+        self._runtime_user_bindings = bindings
+
     @staticmethod
     def _alias_list_entries(
         config_aliases: dict[str, str],
@@ -1223,14 +1490,15 @@ class Main(Star):
         if not user_id:
             return self._plain(event, "\n".join([self._time_line(), "⚠️ 无法识别当前用户，暂不能解绑"]))
 
-        bindings = getattr(self, "_runtime_user_bindings", {})
-        removed = bindings.pop(user_id, "")
-        self._runtime_user_bindings = bindings
+        bindings = self._get_user_bindings_for_event(event)
+        removed = bindings.get(user_id, "")
+        self._set_user_binding_for_event(event, user_id, None)
         if removed:
             self._save_settings()
+            scope = "本群" if self._get_group_id(event) else "你的"
             return self._plain(
                 event,
-                "\n".join([self._time_line(), f"✅ 已解除你的 Apex 查询绑定：{removed}"]),
+                "\n".join([self._time_line(), f"✅ 已解除{scope} Apex 查询绑定：{removed}"]),
             )
         return self._plain(event, "\n".join([self._time_line(), "ℹ️ 你当前没有 Apex 查询绑定"]))
 
@@ -1337,7 +1605,19 @@ class Main(Star):
             if not normalized or normalized in checked:
                 continue
             checked.add(normalized)
-            if self._is_blacklisted(display_name) or self._is_query_blocked(display_name):
+            if self._is_blacklisted(display_name):
+                return display_name
+        return ""
+
+    def _blocked_query_name(self, *player_names: str) -> str:
+        checked: set[str] = set()
+        for player_name in player_names:
+            display_name = str(player_name or "").strip()
+            normalized = self._normalize_lookup_value(display_name)
+            if not display_name or not normalized or normalized in checked:
+                continue
+            checked.add(normalized)
+            if self._is_query_blocked(display_name):
                 return display_name
         return ""
 
@@ -1355,6 +1635,72 @@ class Main(Star):
             except Exception:
                 pass
         return str(getattr(event, "group_id", "") or "")
+
+    def _session_poll_targets(
+        self, group_id: str, group: Any
+    ) -> tuple[tuple[str, PlayerRecord, str], ...]:
+        """Resolve player subscriptions for each enabled and permitted UMO."""
+        raw_config = getattr(self, "config", {})
+        raw_settings = (
+            raw_config.get("session_settings", {})
+            if isinstance(raw_config, dict)
+            else {}
+        )
+        sessions = (
+            raw_settings.get("sessions", []) if isinstance(raw_settings, dict) else []
+        )
+        configured: dict[str, dict[str, Any]] = {}
+        for item in sessions if isinstance(sessions, list) else []:
+            if not isinstance(item, dict) or not item.get("umo"):
+                continue
+            umo = str(item.get("umo") or "").strip()
+            parts = umo.split(":", 2)
+            item_group = str(
+                item.get("group_id") or (parts[2] if len(parts) == 3 else "")
+            ).strip()
+            if item_group == str(group_id):
+                configured[umo] = item
+
+        subscriptions = getattr(self, "_runtime_session_subscriptions", {})
+        sources = set(configured)
+        legacy_origin = str(getattr(group, "origin", "") or "")
+        if legacy_origin:
+            sources.add(legacy_origin)
+        for umo in subscriptions:
+            parts = str(umo).split(":", 2)
+            if len(parts) == 3 and parts[2] == str(group_id):
+                sources.add(str(umo))
+
+        targets = []
+        for umo in sorted(sources):
+            if not self._is_group_allowed(str(group_id), umo):
+                continue
+            if not coerce_bool(configured.get(umo, {}).get("enabled", True), True):
+                continue
+            players = subscriptions.get(umo, {})
+            if umo == getattr(group, "origin", "") and umo not in subscriptions:
+                # Legacy installations without configured sessions retain group-level delivery.
+                players = {
+                    key: normalize_watch_mode(
+                        getattr(player, "watch_mode", WATCH_MODE_NOTIFY)
+                    )
+                    for key, player in group.players.items()
+                }
+            for player_key, mode in players.items():
+                player = group.players.get(player_key)
+                if player is not None:
+                    targets.append((umo, player, normalize_watch_mode(mode)))
+        return tuple(targets)
+
+    def _session_output_mode(self, umo: str) -> str:
+        raw = getattr(self, "config", {})
+        settings = raw.get("session_settings", {}) if isinstance(raw, dict) else {}
+        for item in settings.get("sessions", []) if isinstance(settings, dict) else []:
+            if isinstance(item, dict) and item.get("umo") == umo:
+                mode = item.get("output_mode", "inherit")
+                if mode in {"image", "text"}:
+                    return mode
+        return self._config.output_mode
 
     async def _send_active_message(self, origin: str, message: str) -> bool:
         if not origin:
@@ -1677,7 +2023,7 @@ class Main(Star):
             )
             return
 
-        blocked_name = self._blocked_lookup_name(requested_player_name, player_name)
+        blocked_name = self._blocked_lookup_name(requested_player_name, player_name) or self._blocked_query_name(requested_player_name, player_name)
         if blocked_name:
             yield self._plain(event, 
                 "\n".join(
@@ -1733,6 +2079,11 @@ class Main(Star):
                     ]
                 )
             )
+            return
+
+        blocked_name = self._blocked_lookup_name(player_data.name, f"uid:{player_data.uid}") or self._blocked_query_name(player_data.name, f"uid:{player_data.uid}")
+        if blocked_name:
+            yield self._plain(event, "\n".join([self._time_line(), f"⛔ 该ID（{blocked_name}）已被管理员加入黑名单，禁止查询"]))
             return
 
         player_data.platform = used_platform
@@ -1984,7 +2335,8 @@ class Main(Star):
             return
 
         group_id = self._get_group_id(event)
-        if group_id and self._is_season_keyword_disabled(group_id):
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if group_id and self._is_season_keyword_disabled(umo, group_id):
             return
 
         if self._guard_access(event):
@@ -1999,20 +2351,20 @@ class Main(Star):
         if self._is_text_output_mode():
             yield self._plain(event, self._format_season_info(season_info))
             if group_id:
-                yield self._plain(event, "🔃 关闭赛季关键词回复：/赛季关闭")
+                yield self._plain(event, "🔃 关闭本会话赛季关键词回复：/赛季关闭")
             return
         try:
             image_path = self._render_season_info_image(season_info)
             yield self._image(event, image_path)
             if group_id:
-                yield self._plain(event, "🔕 关闭赛季关键词回复：/赛季关闭")
+                yield self._plain(event, "🔕 关闭本会话赛季关键词回复：/赛季关闭")
             return
         except Exception as exc:
             logger.error(f"赛季关键词图片生成失败，已回退文字输出: {exc}")
 
         message = self._format_season_info(season_info)
         if group_id:
-            message = "\n".join([message, "🔕 关闭赛季关键词回复：/赛季关闭"])
+            message = "\n".join([message, "🔕 关闭本会话赛季关键词回复：/赛季关闭"])
         yield self._plain(event, message)
 
     @filter.command("赛季关闭")
@@ -2034,9 +2386,11 @@ class Main(Star):
             )
             return
 
-        self._set_season_keyword_disabled(group_id, True)
+        self._set_season_keyword_disabled(
+            str(getattr(event, "unified_msg_origin", "") or ""), True
+        )
         yield self._plain(event, 
-            "\n".join([self._time_line(), "🔕 已关闭本群赛季关键词自动回复"])
+            "\n".join([self._time_line(), "🔕 已关闭本会话赛季关键词自动回复"])
         )
 
     @filter.command("赛季开启")
@@ -2058,9 +2412,11 @@ class Main(Star):
             )
             return
 
-        self._set_season_keyword_disabled(group_id, False)
+        self._set_season_keyword_disabled(
+            str(getattr(event, "unified_msg_origin", "") or ""), False
+        )
         yield self._plain(event, 
-            "\n".join([self._time_line(), "✅ 已开启本群赛季关键词自动回复"])
+            "\n".join([self._time_line(), "✅ 已开启本会话赛季关键词自动回复"])
         )
 
     @filter.command("apexrankwatch")
@@ -2071,7 +2427,7 @@ class Main(Star):
         platform: str = "",
         watch_mode: str = WATCH_MODE_NOTIFY,
     ):
-        """将玩家加入本群排位分数持续监控。"""
+        """监控本群玩家，并在当前 UMO 订阅排位变化；个人查询绑定使用 /apex绑定。"""
         watch_mode = normalize_watch_mode(watch_mode)
         watch_label = self._watch_mode_label(watch_mode)
         deny = self._guard_access(event, require_group=True)
@@ -2155,9 +2511,18 @@ class Main(Star):
             )
             return
 
+        blocked_name = self._blocked_lookup_name(player_data.name, f"uid:{player_data.uid}")
+        if blocked_name:
+            yield self._plain(event, "\n".join([self._time_line(), f"⛔ 该ID（{blocked_name}）已被管理员加入黑名单，禁止监控"]))
+            return
         normalized_platform = self._normalize_platform(used_platform)
         player_key = self._build_player_key(identifier, normalized_platform, use_uid)
         group = self._store.ensure_group(group_id, event.unified_msg_origin)
+        # A newly discovered UMO only subscribes the player requested here.
+        subscriptions = getattr(self, "_runtime_session_subscriptions", {})
+        if event.unified_msg_origin not in subscriptions:
+            subscriptions[event.unified_msg_origin] = {}
+            self._runtime_session_subscriptions = subscriptions
         display_name = self._display_name_with_alias(
             alias_info.alias_display if alias_info.matched else "",
             player_data.name,
@@ -2165,6 +2530,7 @@ class Main(Star):
 
         if player_key in group.players:
             existing_record = group.players[player_key]
+            self._subscribe_session_player(event.unified_msg_origin, player_key, watch_mode)
             old_mode = self._watch_mode(existing_record)
             if old_mode != watch_mode:
                 existing_record.watch_mode = watch_mode
@@ -2203,6 +2569,7 @@ class Main(Star):
             watch_mode=watch_mode,
         )
         self._store.set_player(group_id, player_key, record)
+        self._subscribe_session_player(event.unified_msg_origin, player_key, watch_mode)
         self._store.save()
 
         if watch_mode == WATCH_MODE_NOTIFY:
@@ -2249,9 +2616,6 @@ class Main(Star):
             return
 
         group = self._store.get_group(group_id)
-        if group and event.unified_msg_origin and group.origin != event.unified_msg_origin:
-            group.origin = event.unified_msg_origin
-            self._store.save()
         if not group or not group.players:
             yield self._plain(event, 
                 "\n".join([self._time_line(), "ℹ️ 本群目前没有监控任何玩家的排名"])
@@ -2286,9 +2650,6 @@ class Main(Star):
             return
 
         group = self._store.get_group(group_id)
-        if group and event.unified_msg_origin and group.origin != event.unified_msg_origin:
-            group.origin = event.unified_msg_origin
-            self._store.save()
         if not group or not group.players:
             yield self._plain(
                 event,
@@ -2327,7 +2688,7 @@ class Main(Star):
 
     @filter.command("apexrankremove")
     async def apexrankremove(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
-        """从本群移除指定玩家的排位监控。"""
+        """删除本群玩家监控及其所有 UMO 订阅；单会话退订请使用 Dashboard。"""
         deny = self._guard_access(event, require_group=True)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -2363,9 +2724,6 @@ class Main(Star):
             return
 
         group = self._store.get_group(group_id)
-        if group and event.unified_msg_origin and group.origin != event.unified_msg_origin:
-            group.origin = event.unified_msg_origin
-            self._store.save()
         if not group:
             yield self._plain(event, 
                 "\n".join(
@@ -2394,6 +2752,7 @@ class Main(Star):
             )
             return
 
+        self._unsubscribe_player_everywhere(group_id, player_key)
         self._store.save()
         yield self._plain(event, 
             "\n".join([self._time_line(), f"✅ 已移除本群对 {display_name} 的排名监控"])
@@ -2401,7 +2760,7 @@ class Main(Star):
 
     @filter.command("apexblacklist")
     async def apexblacklist(self, event: AstrMessageEvent, action: str = "", player_name: str = ""):
-        """管理 Apex 玩家查询黑名单，支持 add、remove、list、clear。"""
+        """管理 Apex 玩家全局黑名单（查询与监控推送），支持 add、remove、list、clear。"""
         deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -2720,7 +3079,7 @@ class Main(Star):
 
         raw_target = (self._extract_command_args(event) or str(target or "")).strip()
         action = raw_target.strip().lower()
-        bindings = getattr(self, "_runtime_user_bindings", {})
+        bindings = self._get_user_bindings_for_event(event)
 
         if action in {"list", "ls", "查看", "列表"}:
             yield self._binding_list_response(event, bindings)
@@ -2766,15 +3125,15 @@ class Main(Star):
             )
             return
 
-        bindings[user_id] = normalized_target
-        self._runtime_user_bindings = bindings
+        self._set_user_binding_for_event(event, user_id, normalized_target)
         self._save_settings()
+        scope = "本群内" if self._get_group_id(event) else ""
         yield self._plain(
             event,
             "\n".join(
                 [
                     self._time_line(),
-                    f"✅ 已绑定你的 Apex 查询目标：{normalized_target}",
+                    f"✅ 已绑定{scope}你的 Apex 查询目标：{normalized_target}",
                     "之后直接发送 /apex查询 即可查询该玩家",
                 ]
             ),
@@ -2791,7 +3150,7 @@ class Main(Star):
             yield self._plain(event, "\n".join([self._time_line(), "⚠️ 别名功能已关闭"]))
             return
 
-        bindings = getattr(self, "_runtime_user_bindings", {})
+        bindings = self._get_user_bindings_for_event(event)
         yield self._binding_list_response(event, bindings)
 
     @filter.command("apex解绑", alias={"apexunbind", "取消绑定", "解除绑定"})
@@ -2884,30 +3243,44 @@ class Main(Star):
 
     @filter.command("apex黑名单")
     async def apexblacklist_cn(self, event: AstrMessageEvent, action: str = "", player_name: str = ""):
-        """中文别名：管理 Apex 玩家查询黑名单。"""
+        """中文别名：管理 Apex 玩家全局黑名单（查询与监控推送）。"""
         async for result in self.apexblacklist(event, action, player_name):
             yield result
 
     @filter.command("不准视奸")
     async def apexblacklist_cn_alt(self, event: AstrMessageEvent, action: str = "", player_name: str = ""):
-        """中文别名：管理 Apex 玩家查询黑名单。"""
+        """中文别名：管理 Apex 玩家全局黑名单（查询与监控推送）。"""
         async for result in self.apexblacklist(event, action, player_name):
             yield result
 
     @filter.command("apexban")
     async def apexblacklist_en_alt(self, event: AstrMessageEvent, action: str = "", player_name: str = ""):
-        """管理 Apex 玩家查询黑名单的英文别名。"""
+        """管理 Apex 玩家全局黑名单（查询与监控推送）的英文别名。"""
         async for result in self.apexblacklist(event, action, player_name):
             yield result
 
     async def _poll_loop(self) -> None:
         while not self._stop_event.is_set():
+            started_at = datetime.now(timezone.utc).isoformat()
+            self._webui_poll_state.update(
+                {"status": "running", "last_started": started_at, "last_error": ""}
+            )
             try:
                 await self._poll_once()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.error(f"轮询任务执行失败: {exc}")
+                self._webui_poll_state.update(
+                    {"status": "failed", "last_error": str(exc)}
+                )
+            else:
+                self._webui_poll_state.update(
+                    {
+                        "status": "success",
+                        "last_finished": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(), timeout=self._config.check_interval * 60
@@ -2934,12 +3307,19 @@ class Main(Star):
     async def _poll_fetch_player(
         self,
         group_id: str,
-        group_origin: str,
+        group_origin: str | tuple[str, ...],
         player: PlayerRecord,
         platform: str,
         lookup_id: str,
         use_uid: bool,
+        session_modes: tuple[tuple[str, str], ...] = (),
     ) -> PollFetchResult:
+        group_origins = (
+            tuple(item for item in group_origin if item)
+            if isinstance(group_origin, (tuple, list))
+            else ((group_origin,) if group_origin else ())
+        )
+        primary_origin = group_origins[0] if group_origins else ""
         async with self._poll_semaphore:
             try:
                 player_data, _ = await self._api.fetch_player_stats_auto(
@@ -2947,45 +3327,91 @@ class Main(Star):
                 )
                 return PollFetchResult(
                     group_id=group_id,
-                    group_origin=group_origin,
+                    group_origin=primary_origin,
+                    group_origins=group_origins,
                     player=player,
                     platform=platform,
+                    session_modes=session_modes,
                     player_data=player_data,
                 )
             except PlayerNotFoundError:
                 return PollFetchResult(
                     group_id=group_id,
-                    group_origin=group_origin,
+                    group_origin=primary_origin,
+                    group_origins=group_origins,
                     player=player,
                     platform=platform,
+                    session_modes=session_modes,
                     not_found=True,
                 )
             except Exception as exc:
                 return PollFetchResult(
                     group_id=group_id,
-                    group_origin=group_origin,
+                    group_origin=primary_origin,
+                    group_origins=group_origins,
                     player=player,
                     platform=platform,
+                    session_modes=session_modes,
                     error=exc,
                 )
 
     def _should_skip_poll_player(self, player: PlayerRecord) -> bool:
         lookup_id = getattr(player, "lookup_id", "") or ""
-        candidates = [player.player_name, lookup_id]
+        candidates = [
+            player.player_name,
+            lookup_id,
+            getattr(player, "alias_target", ""),
+            getattr(player, "display_alias", ""),
+        ]
         for candidate in candidates:
             if not candidate:
                 continue
-            if self._is_blacklisted(candidate) or self._is_query_blocked(candidate):
+            if self._is_blacklisted(candidate):
                 return True
         return False
 
+    def _archive_push(self, entry: dict, image_path: Path | None = None) -> None:
+        archive = getattr(self, "_push_archive", None)
+        raw_config = getattr(self, "config", {})
+        if archive is None or not coerce_bool(
+            raw_config.get("push_archive_enabled", True), True
+        ):
+            return
+        try:
+            archive.append(entry, image_path)
+        except Exception as exc:
+            logger.error(f"保存推送归档失败: {exc}")
+
+    def _cleanup_push_archive(self) -> None:
+        archive = getattr(self, "_push_archive", None)
+        today = datetime.now().astimezone().date()
+        if archive is None or getattr(self, "_archive_cleanup_day", None) == today:
+            return
+        raw_config = getattr(self, "config", {})
+        retention = max(
+            1,
+            min(365, coerce_int(raw_config.get("push_archive_retention_days", 30), 30)),
+        )
+        try:
+            archive.cleanup(retention, today)
+            self._archive_cleanup_day = today
+        except Exception as exc:
+            logger.error(f"清理推送归档失败: {exc}")
+
     async def _poll_once(self) -> None:
+        self._cleanup_push_archive()
         if not self._config.api_key:
             return
 
         poll_targets = []
         for group_id, group in self._store.iter_groups():
-            for _, player in list(group.players.items()):
+            session_players: dict[int, list[tuple[str, str]]] = {}
+            for origin, player, mode in self._session_poll_targets(group_id, group):
+                session_players.setdefault(id(player), []).append((origin, mode))
+            for player_key, player in list(group.players.items()):
+                subscribers = session_players.get(id(player), [])
+                if not subscribers:
+                    continue
                 if self._should_skip_poll_player(player):
                     lookup_id = getattr(player, "lookup_id", "") or player.player_name
                     logger.warning(f"跳过黑名单ID的定时检查: {lookup_id}")
@@ -2997,18 +3423,19 @@ class Main(Star):
                 poll_targets.append(
                     (
                         group_id,
-                        group.origin,
+                        tuple(origin for origin, _ in subscribers),
                         player,
                         platform,
                         lookup_id,
                         use_uid,
+                        tuple(subscribers),
                     )
                 )
 
         if not poll_targets:
             return
 
-        queue: asyncio.Queue[tuple[str, str, PlayerRecord, str, str, bool]] = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue()
         for target in poll_targets:
             queue.put_nowait(target)
 
@@ -3038,6 +3465,43 @@ class Main(Star):
         for result in results:
             player = result.player
             platform = result.platform
+            result_player_key = ""
+            if self._should_skip_poll_player(player):
+                continue
+            # Re-read permissions after network I/O so a paused/removed subscription cannot send.
+            if hasattr(self._store, "get_group"):
+                group = self._store.get_group(result.group_id)
+                if group is None or not any(
+                    value is player for value in group.players.values()
+                ):
+                    continue
+                result_player_key = next(
+                    (key for key, value in group.players.items() if value is player), ""
+                )
+                result.session_modes = tuple(
+                    (umo, mode)
+                    for umo, candidate, mode in self._session_poll_targets(
+                        result.group_id, group
+                    )
+                    if candidate is player
+                )
+                if not result.session_modes:
+                    continue
+            if result.not_found or result.error:
+                reason = "玩家未找到" if result.not_found else str(result.error)
+                for origin, mode in result.session_modes:
+                    self._archive_push(
+                        {
+                            "group_id": str(result.group_id),
+                            "umo": origin,
+                            "player": self._record_display_name(player),
+                            "platform": self._format_platform(platform),
+                            "mode": mode,
+                            "status": "fetch_failed",
+                            "error": reason[:500],
+                            "message": "本次未获取到有效玩家数据，保留原分数和历史。",
+                        }
+                    )
             if result.not_found:
                 logger.warning(f"玩家 {player.player_name} 在平台 {platform} 未找到")
                 continue
@@ -3103,9 +3567,14 @@ class Main(Star):
                 ]
 
                 if is_season_reset:
-                    message_lines.append("⚠️ 注意: 检测到大幅度分数下降，可能是赛季重置导致")
+                    message_lines.append(
+                        "⚠️ 注意: 检测到大幅度分数下降，可能是赛季重置导致"
+                    )
 
-                if player_data.global_rank_percent and player_data.global_rank_percent != "未知":
+                if (
+                    player_data.global_rank_percent
+                    and player_data.global_rank_percent != "未知"
+                ):
                     message_lines.append(
                         f"🌎 全球排名: {player_data.global_rank_percent}%"
                     )
@@ -3120,32 +3589,90 @@ class Main(Star):
                 if player_data.is_online and player_data.current_state:
                     message_lines.append(f"🎯 当前状态: {player_data.current_state}")
 
-                if result.group_origin and self._watch_mode(player) == WATCH_MODE_NOTIFY:
-                    sent_image = False
-                    if self._is_image_output_mode():
-                        try:
-                            image_path = self._render_rank_change_image(
-                                player_data=player_data,
-                                old_score=old_score,
-                                new_score=new_score,
-                                platform=platform,
-                                is_season_reset=is_season_reset,
-                            )
-                            sent_image = await self._send_active_image(
-                                result.group_origin, image_path
-                            )
-                        except Exception as exc:
-                            logger.error(f"排位分数变化图片生成失败，已回退文字通知: {exc}")
-                    if not sent_image:
-                        await self._send_active_message(
-                            result.group_origin, "\n".join(message_lines)
+                session_modes = result.session_modes or tuple(
+                    (origin, self._watch_mode(player))
+                    for origin in result.group_origins
+                )
+                image_path = None
+                if any(
+                    self._session_output_mode(umo) == "image"
+                    for umo, _ in session_modes
+                ):
+                    try:
+                        image_path = self._render_rank_change_image(
+                            player_data=player_data,
+                            old_score=old_score,
+                            new_score=new_score,
+                            platform=platform,
+                            is_season_reset=is_season_reset,
                         )
-                elif result.group_origin:
-                    logger.debug(
-                        f"玩家 {display_name} 为仅记录模式，已保存分数变化但不主动通报"
+                    except Exception as exc:
+                        logger.error(f"排位分数变化图片生成失败，已回退文字通知: {exc}")
+                for origin, mode in session_modes:
+                    if not self._is_group_allowed(
+                        str(result.group_id), origin
+                    ) or self._should_skip_poll_player(player):
+                        continue
+                    if hasattr(self._store, "get_group"):
+                        current_group = self._store.get_group(result.group_id)
+                        current_mode = (
+                            next(
+                                (
+                                    candidate_mode
+                                    for umo, candidate, candidate_mode in self._session_poll_targets(
+                                        result.group_id, current_group
+                                    )
+                                    if umo == origin and candidate is player
+                                ),
+                                None,
+                            )
+                            if current_group
+                            else None
+                        )
+                        if current_mode is None:
+                            continue
+                        mode = current_mode
+                    sent = False
+                    error = ""
+                    if mode == WATCH_MODE_NOTIFY:
+                        if (
+                            image_path is not None
+                            and self._session_output_mode(origin) == "image"
+                        ):
+                            sent = await self._send_active_image(origin, image_path)
+                        if not sent:
+                            sent = await self._send_active_message(
+                                origin, "\n".join(message_lines)
+                            )
+                        if not sent:
+                            error = "发送失败"
+                    archive_entry = {
+                        "group_id": str(result.group_id),
+                        "umo": origin,
+                        "player_key": result_player_key,
+                        "player": display_name,
+                        "platform": self._format_platform(platform),
+                        "from_score": old_score,
+                        "to_score": new_score,
+                        "score_delta": new_score - old_score,
+                        "rank": new_rank_display,
+                        "mode": mode,
+                        "status": "sent"
+                        if sent
+                        else ("recorded" if mode == WATCH_MODE_RECORD else "failed"),
+                        "error": error,
+                        "message": "\n".join(message_lines),
+                    }
+                    self._archive_push(
+                        archive_entry,
+                        image_path
+                        if self._session_output_mode(origin) == "image"
+                        else None,
                     )
-                else:
-                    logger.warning(f"群 {result.group_id} 缺少 unified_msg_origin，无法主动推送通知")
+                if not session_modes:
+                    logger.debug(
+                        f"群 {result.group_id} 的玩家 {display_name} 没有有效订阅会话"
+                    )
             elif not is_valid_score:
                 logger.warning(
                     f"玩家 {player.player_name} 的分数 {new_score} 无效，保留原分数 {old_score}"
@@ -3236,7 +3763,7 @@ class Main(Star):
             "🕘 /全天地图（API 学习确认排位未来 24 小时地图）",
             "🌍 /匹配地图（三人赛地图轮换）",
             "🏆 /apexpredator [平台]  别名：/apex猎杀 /猎杀",
-            "关键词：消息包含「赛季」自动回复（/赛季关闭，/赛季开启）",
+            "关键词：按 UMO 会话控制，消息包含「赛季」时自动回复（/赛季关闭，/赛季开启）",
             "——",
             "【管理】",
             "🚫 /apexblacklist <add|remove|list|clear> <玩家ID>  别名：/apex黑名单 /不准视奸 /apexban",
@@ -3330,7 +3857,7 @@ class Main(Star):
                     ("🌍 /匹配地图", "三人赛地图轮换"),
                     ("🏆 /apexpredator [平台] /apex猎杀 /猎杀", "大师数量与猎杀底分"),
                     ("🗓️ /apexseason /新赛季", "当前排位分段结束时间"),
-                    ("🔁 赛季关键词", "群消息包含赛季时自动回复"),
+                    ("🔁 赛季关键词", "当前 UMO 会话消息包含赛季时自动回复"),
                 ],
             ),
             (
@@ -3340,7 +3867,7 @@ class Main(Star):
                     ("🚫 /apexblacklist add 玩家ID", "加入动态黑名单"),
                     ("🚫 /apexblacklist list", "查看配置与动态黑名单"),
                     ("🔖 /apexalias add/list/remove", "管理全局查询别名"),
-                    ("🔁 /赛季关闭 /赛季开启", "管理本群赛季关键词回复"),
+                    ("🔁 /赛季关闭 /赛季开启", "管理当前 UMO 会话赛季关键词回复"),
                     ("🧩 /apex_download", "检测或下载中文字体缓存"),
                 ],
             ),
