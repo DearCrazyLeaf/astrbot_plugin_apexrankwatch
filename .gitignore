@@ -10,7 +10,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-tests/
+tests/*
+!tests/test_umo_subscriptions.py
 .venv/
 _generated/
 data/

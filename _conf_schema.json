@@ -1,121 +1,210 @@
 {
   "api_key": {
-    "description": "Apex Legends API Key",
+    "description": "Apex 查询 API Key",
     "type": "string",
     "hint": "Key 申请后通常还需要在 portal.apexlegendsapi.com 绑定 Discord 完成验证，否则查询接口可能返回 429 验证提示。",
     "obvious_hint": true,
     "default": ""
   },
   "debug_logging": {
-    "description": "是否开启调试日志（记录脱敏后的请求参数与返回数据，默认关闭）",
+    "description": "是否开启调试日志",
     "type": "bool",
+    "hint": "记录脱敏后的请求参数与返回数据，用于排查 API 或轮询问题；默认关闭。",
     "default": false
   },
   "check_interval": {
-    "description": "轮询时间间隔（分钟）",
+    "description": "自动检查间隔（分钟）",
     "type": "int",
+    "hint": "后台检查已订阅玩家的频率；只影响自动监控，不影响手动查询。",
     "default": 2
   },
   "timeout_ms": {
     "description": "API 请求超时时间（毫秒）",
     "type": "int",
+    "hint": "单次 API 请求等待的最长时间；网络较慢时可适当调大。",
     "default": 10000
   },
   "max_retries": {
     "description": "API 请求最大重试次数",
     "type": "int",
+    "hint": "请求失败时的额外重试次数；重试会延长本次请求耗时。",
     "default": 3
   },
   "min_valid_score": {
-    "description": "最小有效分数（低于此值视为无效）",
+    "description": "最小有效排位分",
     "type": "int",
+    "hint": "低于此值的 API 返回不会写入玩家记录或触发推送，用于过滤异常数据。",
     "default": 1
   },
   "blacklist": {
-    "description": "黑名单 ID 列表",
+    "description": "玩家全局黑名单",
     "type": "string",
-    "hint": "多个 ID 用中英文逗号分隔，例如：player_a,player_b；UID 示例：uid:0000000000000",
+    "hint": "按玩家名或 UID 匹配；阻止手动查询、后台新增订阅和自动轮询。已有订阅不会删除，移出后可恢复。多个条目用中英文逗号分隔，支持 uid:...。",
     "default": ""
   },
   "query_blocklist": {
-    "description": "禁止查询的玩家ID列表",
+    "description": "手动查询黑名单",
     "type": "string",
-    "hint": "多个 ID 用中英文逗号分隔，例如：player_a,player_b；UID 示例：uid:0000000000000",
+    "hint": "只限制 /apexrank、/apex查询 等一次性查询；不影响已有订阅、自动轮询或新增监控。多个条目用中英文逗号分隔。",
     "default": ""
   },
   "player_aliases": {
-    "description": "查询别名映射",
+    "description": "全局查询别名",
     "type": "string",
-    "hint": "多个别名映射用中英文逗号分隔，格式：别名=玩家名 或 别名=uid:0000000000000；目标后可填写平台，例如：测试=uid:1234 pc,小明=EaName pc。配置别名对所有用户生效，不包含个人绑定。",
+    "hint": "把短名称映射到玩家名或 UID，供所有用户查询使用。格式：别名=玩家名 或 别名=uid:...，目标后可加平台（如 pc）；多个映射用逗号分隔。别名不会创建监控，也不等同于个人绑定。",
     "default": ""
   },
   "alias_enabled": {
-    "description": "是否启用查询别名和个人绑定",
+    "description": "是否启用别名与个人查询绑定",
     "type": "bool",
-    "hint": "开启后 player_aliases、/apexalias 和 /apex绑定 生效；关闭后全局别名解析和个人默认查询绑定都会停用。",
+    "hint": "关闭后全局别名和 /apex绑定 均停用。开启后，全局别名可供所有人查询；个人绑定只为对应用户提供无参数查询的默认目标，不会加入自动推送。",
     "default": true
   },
   "alias_admin_only": {
-    "description": "是否仅允许主人/管理员用QQ命令管理查询别名",
+    "description": "是否限制全局别名管理权限",
     "type": "bool",
-    "hint": "开启后只有 owner_qq 或群管理员可使用 /apexalias、/apex别名 添加/删除别名；关闭后任何可使用插件的用户都可管理别名。",
+    "hint": "开启后只有 owner_qq 中的主人或群管理员可通过 /apexalias、/apex别名 添加或删除全局别名；关闭后任何允许使用插件的用户都可管理。此项不改变个人绑定权限。",
     "default": true
   },
   "user_blacklist": {
-    "description": "禁止使用的QQ号列表",
+    "description": "用户命令黑名单（QQ 号）",
     "type": "string",
-    "hint": "多个QQ号用中英文逗号分隔，例如：100001,100002",
+    "hint": "禁止这些 QQ 号使用插件命令，包括查询、绑定和添加监控；不会删除已有订阅。多个 QQ 号用中英文逗号分隔。主人 QQ 可绕过此限制。",
     "default": ""
   },
   "owner_qq": {
-    "description": "主人QQ号（拥有最大权限，可多个）",
+    "description": "插件主人 QQ 号",
     "type": "string",
-    "hint": "多个QQ号用中英文逗号分隔，例如：100001,100002",
+    "hint": "这些 QQ 号拥有插件命令的最高权限，可绕过用户黑名单和群白名单限制；自动推送仍服从群白名单。多个 QQ 号用中英文逗号分隔。",
     "default": ""
   },
   "whitelist_enabled": {
-    "description": "是否启用群白名单模式",
+    "description": "是否启用群 / UMO 白名单",
     "type": "bool",
+    "hint": "开启后，群命令和自动推送只在白名单范围内生效；列表可填写群 ID 或完整 UMO。",
     "default": false
   },
   "whitelist_groups": {
-    "description": "允许使用的群ID白名单",
+    "description": "允许的群 ID / UMO",
     "type": "string",
-    "hint": "多个群ID用中英文逗号分隔，例如：group_a,group_b",
+    "hint": "填写群 ID（如 10001）会放行该群的所有适配器会话；填写完整 UMO（如 qq-a:GroupMessage:10001）只放行该会话。多个条目用中英文逗号分隔。主人可绕过命令限制，但自动推送仍服从白名单。",
     "default": ""
   },
   "allow_private": {
-    "description": "是否允许私聊使用",
+    "description": "是否允许私聊使用插件命令",
+    "hint": "控制私聊中的插件命令；不影响群聊命令和后台自动推送。",
     "type": "bool",
     "default": true
   },
   "data_dir": {
-    "description": "数据存储目录（留空使用 AstrBot 默认插件数据目录）",
+    "description": "插件数据目录",
     "type": "string",
+    "hint": "用于保存玩家记录、绑定、订阅、缓存和推送归档；留空使用 AstrBot 默认插件数据目录。",
     "default": ""
   },
   "font_auto_download": {
-    "description": "是否在缺少中文字体时自动下载字体缓存",
+    "description": "是否自动下载中文字体",
     "type": "bool",
-    "hint": "默认开启。字体会保存到插件数据目录，不会写入插件安装目录。",
+    "hint": "生成图片卡片时若缺少中文字体则自动下载并缓存；字体保存到插件数据目录，不写入插件安装目录。",
     "default": true
   },
   "font_download_url": {
-    "description": "自定义中文字体下载地址",
+    "description": "自定义中文字体地址",
     "type": "string",
-    "hint": "留空使用官方资源仓库。自定义地址必须提供同一个字体文件，否则 SHA256 校验不会通过。",
+    "hint": "仅在默认地址不可用时填写；留空使用官方资源。地址必须提供相同字体文件，否则 SHA256 校验不会通过。",
     "default": ""
   },
   "output_mode": {
-    "description": "消息输出模式",
+    "description": "全局默认输出模式",
     "type": "string",
-    "hint": "image 为图片模式，text 为文字模式。默认 image，适合 QQ 群图文展示；text 会用紧凑排版和 emoji 图标输出。",
+    "options": [
+      "image",
+      "text"
+    ],
+    "hint": "image 发送图片卡片，text 发送文字消息；默认 image。会话订阅可单独覆盖此默认值。",
     "default": "image"
+  },
+  "reply_to_command": {
+    "description": "查询结果是否引用原指令",
+    "type": "bool",
+    "hint": "开启后在支持引用回复的 QQ 个人号（OneBot v11）适配器中，查询结果会引用触发它的指令；关闭后仍发送结果但不带引用。其他适配器不受此项影响。默认开启。",
+    "default": true
   },
   "season_probe_player": {
     "description": "赛季分段探测账号",
     "type": "string",
-    "hint": "查询排位分段时间时使用的玩家ID。分段窗口对所有玩家一致，任填一个稳定存在的账号即可；留空则使用默认账号 moeneri。",
+    "hint": "仅用于查询排位分段时间；分段窗口对所有玩家一致，不代表要监控此账号。填写稳定存在的玩家名或 UID；留空使用默认账号 moeneri。",
     "default": ""
+  },
+  "session_settings": {
+    "description": "按 UMO 管理自动推送",
+    "type": "object",
+    "hint": "每个完整 UMO 独立设置是否推送、输出格式和订阅玩家。会话条目可在此配置；订阅玩家明细和新增监控玩家请在插件 Dashboard 管理。个人查询绑定不会加入推送。",
+    "items": {
+      "sessions": {
+        "description": "UMO 会话列表",
+        "type": "template_list",
+        "default": [],
+        "templates": {
+          "session": {
+            "name": "会话设置",
+            "display_item": "umo",
+            "items": {
+              "label": {
+                "description": "会话备注",
+                "type": "string",
+                "default": ""
+              },
+              "umo": {
+                "description": "完整 UMO 地址",
+                "type": "string",
+                "default": "",
+                "hint": "消息发送目标，例如 qq-a:GroupMessage:10001；群 ID 单独不能区分不同适配器。"
+              },
+              "enabled": {
+                "description": "启用此会话自动推送",
+                "type": "bool",
+                "default": true
+              },
+              "season_keyword_enabled": {
+                "description": "启用本会话赛季关键词自动回复",
+                "type": "bool",
+                "hint": "仅控制本 UMO 会话中普通消息包含“赛季”时的自动回复；不影响 /apexseason、/新赛季等显式查询，也不影响玩家监控和推送。",
+                "default": true
+              },
+              "group_id": {
+                "description": "关联群 ID（自动生成）",
+                "type": "string",
+                "default": "",
+                "invisible": true
+              },
+              "output_mode": {
+                "description": "本会话推送格式",
+                "type": "string",
+                "options": [
+                  "inherit",
+                  "image",
+                  "text"
+                ],
+                "default": "inherit",
+                "hint": "inherit 跟随全局默认值，image 图片卡片，text 文字消息；只影响此 UMO 的自动推送。"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "push_archive_enabled": {
+    "description": "启用每日推送归档",
+    "type": "bool",
+    "default": true,
+    "hint": "保存分数变化、每个 UMO 的发送结果、仅记录事件和取数失败，包含消息及卡片；不记录没有变化的常规轮询。"
+  },
+  "push_archive_retention_days": {
+    "description": "推送归档保留天数",
+    "type": "int",
+    "default": 30,
+    "hint": "按天清理归档，范围 1-365 天；只删除推送日志和卡片，不删除玩家历史、绑定或订阅。"
   }
 }

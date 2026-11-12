@@ -672,6 +672,7 @@ def test_cn_query_commands_use_configured_alias_target(monkeypatch, message, met
 def test_apexrankwatch_uses_configured_alias_target_for_monitor(monkeypatch):
     main_module = _load_main_module()
     plugin = object.__new__(main_module.Main)
+    monkeypatch.setattr(plugin, "_save_settings", lambda: None)
     plugin._config = _plugin_config(
         main_module,
         player_aliases="测试=uid:1007669673322",
@@ -724,22 +725,19 @@ def test_apexrankwatch_uses_configured_alias_target_for_monitor(monkeypatch):
     assert store.saved_record[1] == "uid:1007669673322@PC"
 
 
-def test_apexrankwatch_blocks_query_blocked_raw_alias_before_fetch(monkeypatch):
+def test_apexrankwatch_does_not_apply_query_only_blocklist(monkeypatch):
     main_module = _load_main_module()
     plugin = object.__new__(main_module.Main)
-    plugin._config = _plugin_config(
-        main_module,
-        player_aliases="BlockedAlias=uid:1007669673322",
-        query_blocklist="BlockedAlias",
-    )
+    plugin._config = _plugin_config(main_module, player_aliases="BlockedAlias=uid:1007669673322", query_blocklist="BlockedAlias")
     plugin._runtime_blacklist = set()
     plugin._runtime_player_aliases = {}
+    calls = []
 
     async def fake_fetch(identifier, platform, use_uid):
-        raise AssertionError("query-blocked raw alias should not reach the API")
+        calls.append(identifier)
+        raise main_module.PlayerNotFoundError("not found")
 
     plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
-
     monkeypatch.setattr(plugin, "_guard_access", lambda event, require_group=False: "")
     monkeypatch.setattr(plugin, "_get_group_id", lambda event: "group-1")
     monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
@@ -753,14 +751,14 @@ def test_apexrankwatch_blocks_query_blocked_raw_alias_before_fetch(monkeypatch):
         return [item async for item in plugin.apexrankwatch(_Event())]
 
     result = asyncio.run(collect())
-
-    assert result[0][0] == "plain"
-    assert "禁止监控" in result[0][1]
+    assert calls == ["1007669673322"]
+    assert "未找到" in result[0][1]
 
 
 def test_apexrankwatch_stores_alias_display_for_monitor(monkeypatch):
     main_module = _load_main_module()
     plugin = object.__new__(main_module.Main)
+    monkeypatch.setattr(plugin, "_save_settings", lambda: None)
     plugin._config = _plugin_config(
         main_module,
         player_aliases="TestAlias=uid:1007669673322",
@@ -813,6 +811,7 @@ def test_apexrankwatch_stores_alias_display_for_monitor(monkeypatch):
 def test_apexrankrecord_stores_record_mode_without_active_test_message(monkeypatch):
     main_module = _load_main_module()
     plugin = object.__new__(main_module.Main)
+    monkeypatch.setattr(plugin, "_save_settings", lambda: None)
     plugin._config = _plugin_config(
         main_module,
         player_aliases="测试=uid:1007669673322",
@@ -866,6 +865,7 @@ def test_apexrankrecord_stores_record_mode_without_active_test_message(monkeypat
 def test_apexrankwatch_stores_notify_mode(monkeypatch):
     main_module = _load_main_module()
     plugin = object.__new__(main_module.Main)
+    monkeypatch.setattr(plugin, "_save_settings", lambda: None)
     plugin._config = _plugin_config(main_module)
 
     async def fake_fetch(identifier, platform, use_uid):
@@ -954,6 +954,7 @@ def test_cn_rank_watch_list_alt_calls_list(monkeypatch):
 def test_cn_apexrankwatch_alias_uses_configured_alias_target(monkeypatch, message, method_name):
     main_module = _load_main_module()
     plugin = object.__new__(main_module.Main)
+    monkeypatch.setattr(plugin, "_save_settings", lambda: None)
     plugin._config = _plugin_config(
         main_module,
         player_aliases="测试=uid:1007669673322",
@@ -1013,6 +1014,7 @@ def test_cn_apexrankwatch_alias_uses_configured_alias_target(monkeypatch, messag
 def test_remove_watch_commands_use_configured_alias_target(monkeypatch, message, method_name):
     main_module = _load_main_module()
     plugin = object.__new__(main_module.Main)
+    monkeypatch.setattr(plugin, "_save_settings", lambda: None)
     plugin._config = _plugin_config(
         main_module,
         player_aliases="测试=uid:1007669673322",
